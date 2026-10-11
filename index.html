@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Starlx</title>
+<meta name="theme-color" content="#0C1724">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Starlx">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="icon.png">
+<link rel="icon" href="icon.png">
+<style>
+  :root { --bg:#0C1724; --panel:#13243A; --line:#22405F; --text:#E6EEF7; --dim:#7F96AD; --arc:#5BE0F0; --gold:#E8B04A; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+    font-family:"Avenir Next","Segoe UI",system-ui,sans-serif; }
+  .app { height:100dvh; display:flex; flex-direction:column; }
+  .top { display:flex; align-items:center; gap:12px; padding:calc(12px + env(safe-area-inset-top)) 16px 12px;
+    border-bottom:1px solid var(--line); }
+  .top .grow { flex:1; }
+  .name { font-size:20px; font-weight:600; letter-spacing:.04em; }
+  .status { font-size:13px; color:var(--dim); }
+  .iconbtn { background:none; border:1px solid var(--line); color:var(--dim); border-radius:10px;
+    padding:8px 12px; font-size:14px; cursor:pointer; }
+  .feed { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .empty { margin:auto; text-align:center; color:var(--dim); font-size:16px; line-height:1.5; max-width:260px; }
+  .msg { max-width:82%; padding:10px 14px; border-radius:16px; font-size:16px; line-height:1.45; white-space:pre-wrap; }
+  .user { align-self:flex-end; background:var(--gold); color:#1B1405; border-bottom-right-radius:4px; }
+  .ai { align-self:flex-start; background:var(--panel); border:1px solid var(--line); border-bottom-left-radius:4px; }
+  .err { color:#F2A0A0; font-size:14px; text-align:center; }
+  .bar { display:flex; gap:8px; padding:12px 16px calc(12px + env(safe-area-inset-bottom));
+    border-top:1px solid var(--line); }
+  select, textarea, input { font-family:inherit; font-size:16px; color:var(--text); background:var(--panel);
+    border:1px solid var(--line); border-radius:12px; padding:10px 12px; }
+  .bar textarea { flex:1; resize:none; line-height:1.4; max-height:110px; }
+  button.primary { background:var(--arc); color:#06222A; border:none; border-radius:12px; padding:0 18px;
+    font-size:16px; font-weight:600; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  :focus-visible { outline:2px solid var(--arc); outline-offset:2px; }
+  .sheet { position:fixed; inset:0; background:rgba(5,10,18,.8); display:none; align-items:flex-end; z-index:5; }
+  .sheet.open { display:flex; }
+  .card { width:100%; background:var(--bg); border-top:1px solid var(--line); border-radius:18px 18px 0 0;
+    padding:20px 16px calc(20px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:12px; }
+  .card h2 { margin:0; font-size:18px; }
+  .card p { margin:0; color:var(--dim); font-size:14px; line-height:1.5; }
+  .card input, .card select { width:100%; }
+  .row { display:flex; gap:8px; }
+  .row button { flex:1; padding:12px; }
+  button.ghost { background:none; border:1px solid var(--line); color:var(--text); border-radius:12px; font-size:16px; cursor:pointer; }
+  .reactor svg .spin, .reactor svg .core { transform-origin:50px 50px; }
+  .reactor svg .core { opacity:.85; }
+  .reactor.active .spin { animation:spin 1.2s linear infinite; }
+  .reactor.active .core { animation:pulse .9s ease-in-out infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  @keyframes pulse { 50% { transform:scale(.7); opacity:1; } }
+  @media (prefers-reduced-motion:reduce) { .reactor.active .spin, .reactor.active .core { animation:none; } }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <div class="reactor" id="reactor" aria-hidden="true">
+      <svg viewBox="0 0 100 100" width="44" height="44">
+        <circle cx="50" cy="50" r="46" fill="none" stroke="#22405F" stroke-width="2"/>
+        <circle class="spin" cx="50" cy="50" r="34" fill="none" stroke="#5BE0F0" stroke-width="3" stroke-dasharray="14 8"/>
+        <circle class="core" cx="50" cy="50" r="16" fill="#5BE0F0"/>
+      </svg>
+    </div>
+    <div class="grow">
+      <div class="name">Starlx</div>
+      <div class="status" id="status">Online</div>
+    </div>
+    <button class="iconbtn" id="openSettings">Settings</button>
+  </div>
+
+  <div class="feed" id="feed"></div>
+
+  <div class="bar">
+    <textarea id="input" rows="1" placeholder="Message Starlx" aria-label="Message Starlx"></textarea>
+    <button class="primary" id="send">Send</button>
+  </div>
+</div>
+
+<div class="sheet" id="sheet">
+  <div class="card">
+    <h2>Settings</h2>
+    <p>Keys are saved only on this phone and sent only to the provider you pick. Keep this page private and don't share your keys.</p>
+    <select id="provider" aria-label="Provider">
+      <option value="anthropic">Anthropic (Claude)</option>
+      <option value="openai">OpenAI</option>
+    </select>
+    <input id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="API key">
+    <input id="model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Model name">
+    <p id="modelHint"></p>
+    <div class="row">
+      <button class="ghost" id="clear">Clear chat</button>
+      <button class="primary" id="save">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const SYSTEM = "You are Starlx, a personal AI assistant in the spirit of Jarvis: calm, quick, loyal, with a touch of dry wit. " +
+  "Talk to the user directly. Keep replies short (1-4 sentences) unless asked for more. Plain text only, no markdown.";
+const PROVIDERS = {
+  anthropic: { label: "Anthropic", keyHint: "sk-ant-...", defaultModel: "claude-sonnet-4-6",
+    modelHint: "Default is claude-sonnet-4-6. You can type any Claude model name." },
+  openai: { label: "OpenAI", keyHint: "sk-...", defaultModel: "gpt-5.5",
+    modelHint: "Default is gpt-5.5. If you get a 'model not found' error, type a model name your account can use." }
+};
+const store = {
+  get: (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+  set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} }
+};
+const getProvider = () => store.get("starlx_provider", "anthropic");
+const getKey = p => store.get("starlx_key_" + p, "");
+const getModel = p => store.get("starlx_model_" + p, "") || PROVIDERS[p].defaultModel;
+const CHAT_STORE = "starlx_chat";
+
+async function askModel(history) {
+  const provider = getProvider();
+  const key = getKey(provider);
+  const model = getModel(provider);
+  if (provider === "openai") {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
+      body: JSON.stringify({ model: model, messages: [{ role: "system", content: SYSTEM }, ...history] })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
+    return ((data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content) || "").trim();
+  }
+  const res = await fetch("https://api.anthropic.com/v1/messages", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-api-key": key,
+      "anthropic-version": "2023-06-01",
+      "anthropic-dangerous-direct-browser-access": "true"
+    },
+    body: JSON.stringify({ model: model, max_tokens: 1000, system: SYSTEM, messages: history })
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
+  return (data.content || []).map(b => b.type === "text" ? b.text : "").join("\n").trim();
+}
+
+const feed = document.getElementById("feed");
+const input = document.getElementById("input");
+const sendBtn = document.getElementById("send");
+const reactor = document.getElementById("reactor");
+const statusEl = document.getElementById("status");
+const sheet = document.getElementById("sheet");
+const keyInput = document.getElementById("key");
+const providerSel = document.getElementById("provider");
+const modelInput = document.getElementById("model");
+const modelHint = document.getElementById("modelHint");
+
+let messages = [];
+try { messages = JSON.parse(store.get(CHAT_STORE, "[]")); } catch (e) { messages = []; }
+let loading = false;
+
+function saveChat() {
+  store.set(CHAT_STORE, JSON.stringify(messages.slice(-60)));
+}
+
+function render(errorText) {
+  feed.innerHTML = "";
+  if (messages.length === 0) {
+    const d = document.createElement("div");
+    d.className = "empty";
+    d.textContent = getKey(getProvider())
+      ? "Starlx is online. Type a message to begin."
+      : "Starlx needs an API key. Tap Settings to add one.";
+    feed.appendChild(d);
+  }
+  messages.forEach(m => {
+    const d = document.createElement("div");
+    d.className = "msg " + (m.role === "user" ? "user" : "ai");
+    d.textContent = m.content;
+    feed.appendChild(d);
+  });
+  if (errorText) {
+    const e = document.createElement("div");
+    e.className = "err";
+    e.textContent = errorText;
+    feed.appendChild(e);
+  }
+  feed.scrollTop = feed.scrollHeight;
+}
+
+function setLoading(v) {
+  loading = v;
+  reactor.classList.toggle("active", v);
+  statusEl.textContent = v ? "Thinking" : "Online";
+  sendBtn.disabled = v;
+}
+
+async function send() {
+  const text = input.value.trim();
+  if (!text || loading) return;
+  if (!getKey(getProvider())) { openSettings(); return; }
+
+  messages.push({ role: "user", content: text });
+  input.value = "";
+  saveChat();
+  render();
+  setLoading(true);
+
+  try {
+    const reply = await askModel(messages);
+    if (!reply) throw new Error("Empty reply");
+    messages.push({ role: "assistant", content: reply });
+    saveChat();
+    render();
+  } catch (e) {
+    messages.pop();
+    input.value = text;
+    saveChat();
+    render("Starlx couldn't answer: " + e.message);
+  } finally {
+    setLoading(false);
+  }
+}
+
+sendBtn.addEventListener("click", send);
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+
+function fillSettings() {
+  const p = providerSel.value;
+  keyInput.placeholder = PROVIDERS[p].keyHint;
+  keyInput.value = getKey(p);
+  modelInput.placeholder = PROVIDERS[p].defaultModel;
+  modelInput.value = store.get("starlx_model_" + p, "");
+  modelHint.textContent = PROVIDERS[p].modelHint;
+}
+function openSettings() {
+  providerSel.value = getProvider();
+  fillSettings();
+  sheet.classList.add("open");
+}
+providerSel.addEventListener("change", fillSettings);
+document.getElementById("openSettings").addEventListener("click", openSettings);
+document.getElementById("save").addEventListener("click", () => {
+  const p = providerSel.value;
+  store.set("starlx_provider", p);
+  store.set("starlx_key_" + p, keyInput.value.trim());
+  store.set("starlx_model_" + p, modelInput.value.trim());
+  sheet.classList.remove("open");
+  render();
+});
+document.getElementById("clear").addEventListener("click", () => {
+  messages = [];
+  saveChat();
+  sheet.classList.remove("open");
+  render();
+});
+sheet.addEventListener("click", e => { if (e.target === sheet) sheet.classList.remove("open"); });
+
+render();
+</script>
+</body>
+</html>
