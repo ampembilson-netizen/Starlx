@@ -91,6 +91,8 @@
     <select id="provider" aria-label="Provider">
       <option value="anthropic">Anthropic (Claude)</option>
       <option value="openai">OpenAI</option>
+      <option value="gemini">Google Gemini (free tier)</option>
+      <option value="groq">Groq (free tier)</option>
     </select>
     <input id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="API key">
     <input id="model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Model name">
@@ -109,7 +111,14 @@ const PROVIDERS = {
   anthropic: { label: "Anthropic", keyHint: "sk-ant-...", defaultModel: "claude-sonnet-4-6",
     modelHint: "Default is claude-sonnet-4-6. You can type any Claude model name." },
   openai: { label: "OpenAI", keyHint: "sk-...", defaultModel: "gpt-5.5",
-    modelHint: "Default is gpt-5.5. If you get a 'model not found' error, type a model name your account can use." }
+    modelHint: "Default is gpt-5.5. If you get a 'model not found' error, type a model name your account can use.",
+    url: "https://api.openai.com/v1/chat/completions" },
+  gemini: { label: "Gemini", keyHint: "AIza...", defaultModel: "gemini-2.5-flash",
+    modelHint: "Free key from aistudio.google.com. Default is gemini-2.5-flash. If it errors, try another Gemini model name.",
+    url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" },
+  groq: { label: "Groq", keyHint: "gsk_...", defaultModel: "llama-3.3-70b-versatile",
+    modelHint: "Free key from console.groq.com. Default is llama-3.3-70b-versatile. If it errors, check Groq's model list for a current name.",
+    url: "https://api.groq.com/openai/v1/chat/completions" }
 };
 const store = {
   get: (k, d) => { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
@@ -124,8 +133,8 @@ async function askModel(history) {
   const provider = getProvider();
   const key = getKey(provider);
   const model = getModel(provider);
-  if (provider === "openai") {
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+  if (provider !== "anthropic") {
+    const res = await fetch(PROVIDERS[provider].url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
       body: JSON.stringify({ model: model, messages: [{ role: "system", content: SYSTEM }, ...history] })
