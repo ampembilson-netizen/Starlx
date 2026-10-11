@@ -59,6 +59,9 @@
   .attach img { height:48px; border-radius:8px; }
   .pic { display:block; max-width:100%; max-height:200px; border-radius:10px; margin-bottom:6px; }
   .note { font-size:13px; opacity:.7; }
+  button.act { background:none; font-family:inherit; cursor:pointer; }
+  .devline { padding:6px 16px; border-bottom:1px solid var(--line); word-break:break-word; }
+  .devline[hidden] { display:none; }
   .actions { align-self:flex-start; display:flex; flex-wrap:wrap; gap:8px; max-width:92%; }
   .act { border:1px solid var(--arc); color:var(--arc); border-radius:999px; padding:8px 14px;
     font-size:15px; text-decoration:none; }
@@ -98,7 +101,9 @@
   <div class="tools">
     <button class="iconbtn" id="voiceToggle" aria-pressed="false">Voice: off</button>
     <button class="iconbtn" id="handsFree" aria-pressed="false">Hands-free: off</button>
+    <button class="iconbtn" id="devBtn">Device: connect</button>
   </div>
+  <div class="note devline" id="devLine" hidden></div>
 
   <div class="feed" id="feed"></div>
 
@@ -151,6 +156,15 @@
       <p>One fact per line. Edit or delete lines to change what Starlx remembers.</p>
       <textarea id="facts" rows="4" aria-label="Starlx memory" placeholder="Nothing remembered yet. Say 'Remember that...' in chat."></textarea>
     </details>
+    <details>
+      <summary>Backup</summary>
+      <p>Saves your memory, personality, chat and settings to a file. API keys are not included, so you re-enter those yourself.</p>
+      <div class="row">
+        <button class="ghost" id="exportBtn">Export</button>
+        <button class="ghost" id="importBtn">Import</button>
+      </div>
+      <input type="file" id="importFile" accept="application/json,.json" hidden>
+    </details>
     <div class="row">
       <button class="ghost" id="clear">Clear chat</button>
       <button class="primary" id="save">Save</button>
@@ -189,8 +203,9 @@ function buildSystem() {
   const len = LENGTHS[store.get("starlx_len", "short")] || LENGTHS.short;
   const name = store.get("starlx_name", "AJ").trim();
   const extra = store.get("starlx_extra", "").trim();
+  const dev = deviceContext();
   let out = IDENTITY + " " + tone + " " + len + (name ? " Address the user as " + name + "." : "") +
-    (extra ? " Extra instructions from the user: " + extra : "") + MEMORY_RULES + ACTION_RULES;
+    (extra ? " Extra instructions from the user: " + extra : "") + MEMORY_RULES + ACTION_RULES + dev;
   if (facts.length) out += " Facts you remember about the user: " + facts.join("; ") + ".";
   return out;
 }
@@ -212,6 +227,7 @@ function fmtSecs(n) {
   if (n % 60 === 0) return (n / 60) + " min";
   return n + " sec";
 }
+const SAFE_CMD = /^[A-Za-z0-9 _=:.,-]{1,40}$/;
 function buildAction(parts) {
   const t = (parts[0] || "").toLowerCase().trim();
   const a1 = (parts[1] || "").trim();
@@ -236,6 +252,11 @@ function buildAction(parts) {
   if (t === "search" && a1) return { label: "Search: " + a1.slice(0, 28), href: "https://www.google.com/search?q=" + q(a1), ext: true };
   if (t === "youtube" && a1) return { label: "YouTube: " + a1.slice(0, 26), href: "https://www.youtube.com/results?search_query=" + q(a1), ext: true };
   if (t === "maps" && a1) return { label: "Maps: " + a1.slice(0, 28), href: "https://www.google.com/maps/search/?api=1&query=" + q(a1), ext: true };
+  if (t === "device") {
+    const cmd = parts.slice(1).join("|").trim().toUpperCase();
+    if (!SAFE_CMD.test(cmd)) return null;
+    return { label: "Send: " + cmd, cmd: cmd };
+  }
   const num = a1.replace(/[^\d+]/g, "");
   if (t === "call" && num) return { label: "Call " + num, href: "tel:" + num };
   if (t === "text" && num) return { label: "Text " + num, href: "sms:" + num + (a2 ? "?body=" + q(a2) : "") };
@@ -370,6 +391,14 @@ function render(errorText) {
       const row = document.createElement("div");
       row.className = "actions";
       m.actions.forEach(act => {
+        if (act.cmd) {
+          const b = document.createElement("button");
+          b.className = "act";
+          b.textContent = act.label;
+          b.addEventListener("click", () => sendDevice(act.cmd));
+          row.appendChild(b);
+          return;
+        }
         const a = document.createElement("a");
         a.className = "act";
         a.textContent = act.label;
@@ -564,6 +593,117 @@ fileInput.addEventListener("change", async () => {
   try { setPending(await loadImage(f)); } catch (e) { render(e.message); }
 });
 document.getElementById("attachClear").addEventListener("click", () => setPending(null));
+
+// ---- Device (Bluetooth to Arduino) ----
+const devBtn = document.getElementById("devBtn");
+const devLine = document.getElementById("devLine");
+const BT_SERVICE = 0xFFE0, BT_CHAR = 0xFFE1;
+let btDevice = null, btChar = null, btBuf = "", lastReading = null;
+
+function showDevLine(t) { devLine.hidden = false; devLine.textContent = t; }
+function paintDevice() {
+  const on = !!btChar;
+  devBtn.textContent = on ? "Device: connected" : "Device: connect";
+  devBtn.classList.toggle("active", on);
+}
+paintDevice();
+
+function deviceContext() {
+  if (!btChar) return "";
+  let out = " The user's Arduino is connected over Bluetooth.";
+  if (lastReading) {
+    const secs = Math.round((Date.now() - lastReading.time) / 1000);
+    out += " Latest reading (" + secs + "s ago): " + lastReading.text + ". Format: T=temperature in C, S=soil moisture raw (higher means drier), L=light raw (higher means brighter), PUMP/FAN/LIGHT=1 when on, AUTO=1 when automatic mode is on.";
+  }
+  out += " To control it, add [[action: device | COMMAND]] where COMMAND is one of PUMP ON, PUMP OFF, FAN ON, FAN OFF, LIGHT ON, LIGHT OFF, AUTO ON, AUTO OFF, STATUS. Only when the user asks.";
+  return out;
+}
+
+function onBtData(ev) {
+  btBuf += new TextDecoder().decode(ev.target.value);
+  let i;
+  while ((i = btBuf.indexOf("\n")) >= 0) {
+    const line = btBuf.slice(0, i).trim();
+    btBuf = btBuf.slice(i + 1);
+    if (line) { lastReading = { text: line, time: Date.now() }; showDevLine(line); }
+  }
+}
+
+async function connectDevice() {
+  if (!navigator.bluetooth) { render("Bluetooth isn't available here. Use Chrome on Android."); return; }
+  try {
+    btDevice = await navigator.bluetooth.requestDevice({ acceptAllDevices: true, optionalServices: [BT_SERVICE] });
+    btDevice.addEventListener("gattserverdisconnected", () => { btChar = null; paintDevice(); showDevLine("Device disconnected."); });
+    const server = await btDevice.gatt.connect();
+    const svc = await server.getPrimaryService(BT_SERVICE);
+    btChar = await svc.getCharacteristic(BT_CHAR);
+    await btChar.startNotifications();
+    btChar.addEventListener("characteristicvaluechanged", onBtData);
+    paintDevice();
+    showDevLine("Connected to " + (btDevice.name || "device") + ". Waiting for readings...");
+  } catch (e) {
+    btChar = null;
+    paintDevice();
+    if (e && /cancel/i.test(e.message || "")) return;
+    render("Could not connect: " + (e && e.message ? e.message : "unknown error") + " (Needs a BLE module such as HM-10.)");
+  }
+}
+
+async function sendDevice(cmd) {
+  if (!btChar) { render("Device isn't connected. Tap Device: connect first."); return; }
+  if (!SAFE_CMD.test(cmd)) return;
+  try {
+    const data = new TextEncoder().encode(cmd + "\n");
+    for (let i = 0; i < data.length; i += 20) {
+      const part = data.slice(i, i + 20);
+      if (btChar.writeValueWithoutResponse) await btChar.writeValueWithoutResponse(part);
+      else await btChar.writeValue(part);
+    }
+    showDevLine("Sent: " + cmd);
+  } catch (e) {
+    render("Send failed: " + e.message);
+  }
+}
+
+devBtn.addEventListener("click", () => {
+  if (btChar && btDevice && btDevice.gatt) { btDevice.gatt.disconnect(); }
+  else connectDevice();
+});
+
+// ---- Backup ----
+function exportBackup() {
+  const data = {};
+  for (let i = 0; i < localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && k.startsWith("starlx_") && !k.startsWith("starlx_key_")) data[k] = localStorage.getItem(k);
+  }
+  const blob = new Blob([JSON.stringify({ app: "starlx", version: 1, data: data }, null, 1)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = "starlx-backup.json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+}
+async function importBackup(file) {
+  const obj = JSON.parse(await file.text());
+  if (!obj || obj.app !== "starlx" || typeof obj.data !== "object") throw new Error("That file is not a Starlx backup");
+  Object.keys(obj.data).forEach(k => {
+    if (k.startsWith("starlx_") && !k.startsWith("starlx_key_") && typeof obj.data[k] === "string") store.set(k, obj.data[k]);
+  });
+  location.reload();
+}
+document.getElementById("exportBtn").addEventListener("click", exportBackup);
+const importFile = document.getElementById("importFile");
+document.getElementById("importBtn").addEventListener("click", () => importFile.click());
+importFile.addEventListener("change", async () => {
+  const f = importFile.files && importFile.files[0];
+  importFile.value = "";
+  if (!f) return;
+  try { await importBackup(f); }
+  catch (e) { sheet.classList.remove("open"); render("Import failed: " + e.message); }
+});
 
 sendBtn.addEventListener("click", send);
 input.addEventListener("keydown", e => {
