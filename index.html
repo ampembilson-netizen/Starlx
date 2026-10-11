@@ -48,9 +48,12 @@
   .sheet.open { display:flex; }
   .card { width:100%; background:var(--bg); border-top:1px solid var(--line); border-radius:18px 18px 0 0;
     padding:20px 16px calc(20px + env(safe-area-inset-bottom)); display:flex; flex-direction:column; gap:12px; }
+  .card { max-height:92dvh; overflow-y:auto; }
   .card h2 { margin:0; font-size:18px; }
   .card p { margin:0; color:var(--dim); font-size:14px; line-height:1.5; }
-  .card input, .card select { width:100%; }
+  .card input, .card select, .card textarea { width:100%; }
+  .card input[type=checkbox] { width:auto; margin-right:8px; }
+  .check { display:flex; align-items:center; font-size:14px; color:var(--dim); }
   .row { display:flex; gap:8px; }
   .row button { flex:1; padding:12px; }
   button.ghost { background:none; border:1px solid var(--line); color:var(--text); border-radius:12px; font-size:16px; cursor:pointer; }
@@ -103,6 +106,9 @@
     <input id="key" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="API key">
     <input id="model" type="text" autocomplete="off" autocapitalize="off" spellcheck="false" aria-label="Model name">
     <p id="modelHint"></p>
+    <label class="check"><input type="checkbox" id="searchOn"> Let Starlx search the web (Anthropic only)</label>
+    <p>Starlx memory. One fact per line. Edit or delete lines to change what it remembers.</p>
+    <textarea id="facts" rows="4" aria-label="Starlx memory" placeholder="Nothing remembered yet. Say 'Remember that...' in chat."></textarea>
     <div class="row">
       <button class="ghost" id="clear">Clear chat</button>
       <button class="primary" id="save">Save</button>
@@ -116,6 +122,30 @@ const SYSTEM = "You are Starlx, a personal AI assistant in the spirit of Jarvis:
   "If asked who created you or who built you, say you were created by Emmanuel Ampem (AJ). Do not claim to be made by OpenAI, Google, Meta, Anthropic or any other company. " +
   "If asked what technology runs you, you may say you run on a language model behind the scenes. " +
   "Talk to the user directly. Keep replies short (1-4 sentences) unless asked for more. Plain text only, no markdown.";
+const MEMORY_RULES = " Memory: when the user asks you to remember something, add a final line in exactly this form: [[remember: short fact in plain words]]. " +
+  "Only do this when asked to remember something. Never mention this format to the user. If you have facts below, use them naturally when relevant.";
+const FACTS_STORE = "starlx_facts";
+function getFacts() { try { const f = JSON.parse(store.get(FACTS_STORE, "[]")); return Array.isArray(f) ? f : []; } catch (e) { return []; } }
+function setFacts(list) { store.set(FACTS_STORE, JSON.stringify(list.slice(-60))); }
+function buildSystem() {
+  const facts = getFacts();
+  let out = SYSTEM + MEMORY_RULES;
+  if (facts.length) out += " Facts you remember about the user: " + facts.join("; ") + ".";
+  return out;
+}
+function takeMemory(reply) {
+  const re = /\[\[remember:\s*([^\]]+?)\s*\]\]/gi;
+  const facts = getFacts();
+  let m, changed = false;
+  while ((m = re.exec(reply)) !== null) {
+    const f = m[1].trim();
+    if (f && !facts.some(x => x.toLowerCase() === f.toLowerCase())) { facts.push(f); changed = true; }
+  }
+  if (changed) setFacts(facts);
+  const cleaned = reply.replace(re, "").trim();
+  return cleaned || "Noted.";
+}
+
 const PROVIDERS = {
   anthropic: { label: "Anthropic", keyHint: "sk-ant-...", defaultModel: "claude-sonnet-4-6",
     modelHint: "Default is claude-sonnet-4-6. You can type any Claude model name." },
@@ -126,7 +156,7 @@ const PROVIDERS = {
     modelHint: "Free key from aistudio.google.com. Default is gemini-2.5-flash. If it errors, try another Gemini model name.",
     url: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions" },
   groq: { label: "Groq", keyHint: "gsk_...", defaultModel: "llama-3.3-70b-versatile",
-    modelHint: "Free key from console.groq.com. Default is llama-3.3-70b-versatile. If it errors, check Groq's model list for a current name.",
+    modelHint: "Free key from console.groq.com. If a model errors, check Groq's model list. To let Starlx search the web, type groq/compound as the model.",
     url: "https://api.groq.com/openai/v1/chat/completions" }
 };
 const store = {
@@ -146,7 +176,7 @@ async function askModel(history) {
     const res = await fetch(PROVIDERS[provider].url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
-      body: JSON.stringify({ model: model, messages: [{ role: "system", content: SYSTEM }, ...history] })
+      body: JSON.stringify({ model: model, messages: [{ role: "system", content: buildSystem() }, ...history] })
     });
     const data = await res.json();
     if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
@@ -160,11 +190,14 @@ async function askModel(history) {
       "anthropic-version": "2023-06-01",
       "anthropic-dangerous-direct-browser-access": "true"
     },
-    body: JSON.stringify({ model: model, max_tokens: 1000, system: SYSTEM, messages: history })
+    body: JSON.stringify(Object.assign(
+      { model: model, max_tokens: 1000, system: buildSystem(), messages: history },
+      store.get("starlx_search", "0") === "1" ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }] } : {}
+    ))
   });
   const data = await res.json();
   if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
-  return (data.content || []).map(b => b.type === "text" ? b.text : "").join("\n").trim();
+  return (data.content || []).map(b => b.type === "text" ? b.text : "").join("").trim();
 }
 
 const feed = document.getElementById("feed");
@@ -230,8 +263,9 @@ async function send() {
   setLoading(true);
 
   try {
-    const reply = await askModel(messages);
+    let reply = await askModel(messages);
     if (!reply) throw new Error("Empty reply");
+    reply = takeMemory(reply);
     messages.push({ role: "assistant", content: reply });
     saveChat();
     render();
@@ -315,6 +349,8 @@ function fillSettings() {
   modelInput.placeholder = PROVIDERS[p].defaultModel;
   modelInput.value = store.get("starlx_model_" + p, "");
   modelHint.textContent = PROVIDERS[p].modelHint;
+  document.getElementById("searchOn").checked = store.get("starlx_search", "0") === "1";
+  document.getElementById("facts").value = getFacts().join("\n");
 }
 function openSettings() {
   providerSel.value = getProvider();
@@ -328,6 +364,8 @@ document.getElementById("save").addEventListener("click", () => {
   store.set("starlx_provider", p);
   store.set("starlx_key_" + p, keyInput.value.trim());
   store.set("starlx_model_" + p, modelInput.value.trim());
+  store.set("starlx_search", document.getElementById("searchOn").checked ? "1" : "0");
+  setFacts(document.getElementById("facts").value.split("\n").map(x => x.trim()).filter(Boolean));
   sheet.classList.remove("open");
   render();
 });
