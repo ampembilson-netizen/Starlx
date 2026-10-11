@@ -101,6 +101,8 @@
   <div class="tools">
     <button class="iconbtn" id="voiceToggle" aria-pressed="false">Voice: off</button>
     <button class="iconbtn" id="handsFree" aria-pressed="false">Hands-free: off</button>
+    <button class="iconbtn" id="wakeBtn" aria-pressed="false">Wake word: off</button>
+    <button class="iconbtn" id="briefBtn">Briefing</button>
     <button class="iconbtn" id="devBtn">Device: connect</button>
   </div>
   <div class="note devline" id="devLine" hidden></div>
@@ -195,6 +197,8 @@ const ACTION_RULES = " Actions: if the user asks you to do something on their ph
 const MEMORY_RULES = " Memory: when the user asks you to remember something, add a final line in exactly this form: [[remember: short fact in plain words]]. " +
   "Only do this when asked to remember something. Never mention this format to the user. If you have facts below, use them naturally when relevant.";
 const FACTS_STORE = "starlx_facts";
+let turnContext = "";
+const BRIEF_RE = /^\s*(?:please\s+)?(?:brief me|give me (?:my |the )?(?:daily |morning )?brief(?:ing)?|(?:daily|morning|my) briefing)\b/i;
 function getFacts() { try { const f = JSON.parse(store.get(FACTS_STORE, "[]")); return Array.isArray(f) ? f : []; } catch (e) { return []; } }
 function setFacts(list) { store.set(FACTS_STORE, JSON.stringify(list.slice(-60))); }
 function buildSystem() {
@@ -205,7 +209,7 @@ function buildSystem() {
   const extra = store.get("starlx_extra", "").trim();
   const dev = deviceContext();
   let out = IDENTITY + " " + tone + " " + len + (name ? " Address the user as " + name + "." : "") +
-    (extra ? " Extra instructions from the user: " + extra : "") + MEMORY_RULES + ACTION_RULES + dev;
+    (extra ? " Extra instructions from the user: " + extra : "") + MEMORY_RULES + ACTION_RULES + dev + (turnContext ? " " + turnContext : "");
   if (facts.length) out += " Facts you remember about the user: " + facts.join("; ") + ".";
   return out;
 }
@@ -448,6 +452,7 @@ async function send() {
   setLoading(true);
 
   try {
+    if (BRIEF_RE.test(text)) turnContext = await getBriefContext();
     let reply = await askModel(messages);
     if (!reply) throw new Error("Empty reply");
     const parsed = takeActions(reply);
@@ -463,6 +468,7 @@ async function send() {
     saveChat();
     render("Starlx couldn't answer: " + e.message + (image ? " (If you sent a photo, check that your model can read images.)" : ""));
   } finally {
+    turnContext = "";
     setLoading(false);
   }
 }
@@ -470,6 +476,7 @@ async function send() {
 // ---- Voice ----
 let voiceOn = store.get("starlx_voice", "0") === "1";
 let handsFree = false;
+let speaking = false, speakId = 0;
 const voiceBtn = document.getElementById("voiceToggle");
 const hfBtn = document.getElementById("handsFree");
 const micBtn = document.getElementById("mic");
@@ -495,12 +502,16 @@ function afterSpeak() {
 }
 function speak(text) {
   if (!voiceOn || !synth) { afterSpeak(); return; }
+  if (wakeRec && wakeActive) { try { wakeRec.abort(); } catch (e) {} }
   synth.cancel();
+  const id = ++speakId;
+  speaking = true;
   const u = new SpeechSynthesisUtterance(text);
   u.lang = navigator.language || "en-US";
   u.rate = 1.0;
-  u.onend = afterSpeak;
-  u.onerror = afterSpeak;
+  const done = () => { if (id === speakId) { speaking = false; afterSpeak(); } };
+  u.onend = done;
+  u.onerror = done;
   synth.speak(u);
 }
 
@@ -510,6 +521,7 @@ let listening = false;
 
 function startListening() {
   if (!SR || listening) return;
+  if (wakeActive) { try { wakeRec.abort(); } catch (e) {} setTimeout(startListening, 300); return; }
   if (synth) synth.cancel();
   let gotResult = false;
   recog = new SR();
@@ -553,6 +565,9 @@ if (!SR) {
   hfBtn.addEventListener("click", () => {
     handsFree = !handsFree;
     if (handsFree) {
+      wakeOn = false;
+      if (wakeRec && wakeActive) { try { wakeRec.abort(); } catch (e) {} }
+      paintWake();
       voiceOn = true;
       store.set("starlx_voice", "1");
       paintVoice();
@@ -675,7 +690,7 @@ function exportBackup() {
   const data = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (k && k.startsWith("starlx_") && !k.startsWith("starlx_key_")) data[k] = localStorage.getItem(k);
+    if (k && k.startsWith("starlx_") && !k.startsWith("starlx_key_") && k !== "starlx_loc") data[k] = localStorage.getItem(k);
   }
   const blob = new Blob([JSON.stringify({ app: "starlx", version: 1, data: data }, null, 1)], { type: "application/json" });
   const a = document.createElement("a");
@@ -690,7 +705,7 @@ async function importBackup(file) {
   const obj = JSON.parse(await file.text());
   if (!obj || obj.app !== "starlx" || typeof obj.data !== "object") throw new Error("That file is not a Starlx backup");
   Object.keys(obj.data).forEach(k => {
-    if (k.startsWith("starlx_") && !k.startsWith("starlx_key_") && typeof obj.data[k] === "string") store.set(k, obj.data[k]);
+    if (k.startsWith("starlx_") && !k.startsWith("starlx_key_") && k !== "starlx_loc" && typeof obj.data[k] === "string") store.set(k, obj.data[k]);
   });
   location.reload();
 }
@@ -703,6 +718,148 @@ importFile.addEventListener("change", async () => {
   if (!f) return;
   try { await importBackup(f); }
   catch (e) { sheet.classList.remove("open"); render("Import failed: " + e.message); }
+});
+
+// ---- Wake word ----
+const wakeBtn = document.getElementById("wakeBtn");
+let wakeOn = false, wakeRec = null, wakeActive = false, audioCtx = null;
+const WAKE_RE = /star\s?(?:lx|lex|lix|licks|alex|lax|lux|links)/i;
+function paintWake() {
+  wakeBtn.textContent = "Wake word: " + (wakeOn ? "on" : "off");
+  wakeBtn.classList.toggle("active", wakeOn);
+  wakeBtn.setAttribute("aria-pressed", String(wakeOn));
+}
+function beep() {
+  if (!audioCtx) return;
+  try {
+    if (audioCtx.state === "suspended") audioCtx.resume();
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.frequency.value = 880; g.gain.value = 0.08;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.15);
+  } catch (e) {}
+}
+function startWake() {
+  if (!SR || !wakeOn || wakeActive || listening || loading || speaking || handsFree) return;
+  let hit = null;
+  const r = new SR();
+  r.lang = navigator.language || "en-US";
+  r.continuous = true;
+  r.interimResults = true;
+  r.onstart = () => { wakeActive = true; statusEl.textContent = "Say Hey Starlx"; };
+  r.onresult = (ev) => {
+    for (let i = ev.resultIndex; i < ev.results.length; i++) {
+      const res = ev.results[i];
+      const t = res[0].transcript;
+      const m = WAKE_RE.exec(t);
+      if (m && res.isFinal) {
+        hit = t.slice(m.index + m[0].length).replace(/^[\s,.!?:-]+/, "").trim();
+        try { r.stop(); } catch (e) {}
+        return;
+      }
+    }
+  };
+  r.onerror = (ev) => {
+    if (ev.error === "not-allowed" || ev.error === "service-not-allowed") {
+      wakeOn = false; paintWake();
+      render("Microphone blocked. Allow the mic for this site in Chrome's site settings.");
+    }
+  };
+  r.onend = () => {
+    wakeActive = false;
+    if (!loading && !listening) statusEl.textContent = "Online";
+    if (hit !== null) {
+      const cmd = hit; hit = null;
+      beep();
+      if (cmd.length > 2) { input.value = cmd; send(); }
+      else setTimeout(startListening, 300);
+    }
+  };
+  wakeRec = r;
+  try { r.start(); } catch (e) { wakeActive = false; }
+}
+setInterval(() => { if (wakeOn) startWake(); }, 1500);
+
+if (!SR) {
+  wakeBtn.style.display = "none";
+} else {
+  wakeBtn.addEventListener("click", () => {
+    wakeOn = !wakeOn;
+    if (wakeOn) {
+      handsFree = false;
+      voiceOn = true;
+      store.set("starlx_voice", "1");
+      if (!audioCtx) { try { audioCtx = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+      if (listening && recog) recog.stop();
+      paintVoice();
+      startWake();
+    } else if (wakeRec && wakeActive) {
+      try { wakeRec.abort(); } catch (e) {}
+    }
+    paintWake();
+  });
+}
+
+// ---- Daily briefing ----
+const WMO = { 0: "clear sky", 1: "mostly clear", 2: "partly cloudy", 3: "overcast", 45: "fog", 48: "fog",
+  51: "light drizzle", 53: "drizzle", 55: "heavy drizzle", 56: "freezing drizzle", 57: "freezing drizzle",
+  61: "light rain", 63: "rain", 65: "heavy rain", 66: "freezing rain", 67: "freezing rain",
+  71: "light snow", 73: "snow", 75: "heavy snow", 77: "snow grains", 80: "rain showers", 81: "rain showers",
+  82: "violent rain showers", 85: "snow showers", 86: "snow showers", 95: "thunderstorm", 96: "thunderstorm with hail", 99: "thunderstorm with hail" };
+
+function getCoords() {
+  return new Promise(resolve => {
+    const cached = store.get("starlx_loc", "");
+    const fallback = () => resolve(cached ? cached.split(",").map(Number) : null);
+    if (!navigator.geolocation) { fallback(); return; }
+    navigator.geolocation.getCurrentPosition(
+      pos => { const c = [pos.coords.latitude, pos.coords.longitude]; store.set("starlx_loc", c.join(",")); resolve(c); },
+      fallback,
+      { timeout: 8000, maximumAge: 3600000 }
+    );
+  });
+}
+
+async function getWeatherText() {
+  const c = await getCoords();
+  if (!c) return "Weather is unavailable because location was not shared.";
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    const url = "https://api.open-meteo.com/v1/forecast?latitude=" + c[0] + "&longitude=" + c[1] +
+      "&current=temperature_2m,apparent_temperature,weather_code&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max&timezone=auto&forecast_days=1";
+    const res = await fetch(url, { signal: ctl.signal });
+    clearTimeout(timer);
+    const d = await res.json();
+    const cur = d.current, day = d.daily;
+    const desc = WMO[cur.weather_code] || "unknown conditions";
+    return "Weather now: " + Math.round(cur.temperature_2m) + "C (feels like " + Math.round(cur.apparent_temperature) + "C), " + desc +
+      ". Today high " + Math.round(day.temperature_2m_max[0]) + "C, low " + Math.round(day.temperature_2m_min[0]) +
+      "C, chance of rain " + day.precipitation_probability_max[0] + "%.";
+  } catch (e) {
+    return "Weather could not be loaded right now.";
+  }
+}
+
+async function getBriefContext() {
+  const now = new Date();
+  const dateStr = now.toLocaleDateString(undefined, { weekday: "long", year: "numeric", month: "long", day: "numeric" });
+  const timeStr = now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const weather = await getWeatherText();
+  const prov = getProvider(), model = getModel(prov);
+  const canSearch = (prov === "groq" && /^groq\/compound/.test(model)) || (prov === "anthropic" && store.get("starlx_search", "0") === "1");
+  const news = canSearch
+    ? "You can search the web: include the top two or three world headlines."
+    : "You cannot browse the web right now, so skip the news and do not invent headlines.";
+  return "This is a briefing request. Facts: today is " + dateStr + ", local time " + timeStr + ". " + weather + " " + news +
+    " Give a short, natural spoken-style briefing: greeting by name, the date, the weather, and one or two things you remember about the user only if useful. " +
+    "Under 120 words, and ignore the usual length limit for this reply. Do not invent anything you were not given.";
+}
+
+document.getElementById("briefBtn").addEventListener("click", () => {
+  if (loading) return;
+  input.value = "Brief me";
+  send();
 });
 
 sendBtn.addEventListener("click", send);
