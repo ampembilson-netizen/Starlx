@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
 <title>Starlx</title>
 <meta name="theme-color" content="#0C1724">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -15,9 +15,10 @@
 <style>
   :root { --bg:#0C1724; --panel:#13243A; --line:#22405F; --text:#E6EEF7; --dim:#7F96AD; --arc:#5BE0F0; --gold:#E8B04A; }
   * { box-sizing: border-box; }
-  html, body { margin:0; height:100%; background:var(--bg); color:var(--text);
+  html, body { margin:0; height:100%; overflow:hidden; overscroll-behavior:none; background:var(--bg); color:var(--text);
     font-family:"Avenir Next","Segoe UI",system-ui,sans-serif; }
-  .app { height:100dvh; display:flex; flex-direction:column; }
+  .app { height:100dvh; display:flex; flex-direction:column; overflow:hidden; }
+  .top, .tools, .devline, .attach, .bar { flex:none; }
   .top { display:flex; align-items:center; gap:12px; padding:calc(12px + env(safe-area-inset-top)) 16px 12px;
     border-bottom:1px solid var(--line); }
   .top .grow { flex:1; }
@@ -25,7 +26,7 @@
   .status { font-size:13px; color:var(--dim); }
   .iconbtn { background:none; border:1px solid var(--line); color:var(--dim); border-radius:10px;
     padding:8px 12px; font-size:14px; cursor:pointer; }
-  .feed { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .feed { flex:1; min-height:0; overscroll-behavior:contain; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
   .empty { margin:auto; text-align:center; color:var(--dim); font-size:16px; line-height:1.5; max-width:260px; }
   .msg { max-width:82%; padding:10px 14px; border-radius:16px; font-size:16px; line-height:1.45; white-space:pre-wrap; }
   .user { align-self:flex-end; background:var(--gold); color:#1B1405; border-bottom-right-radius:4px; }
@@ -53,7 +54,8 @@
   summary { cursor:pointer; font-size:15px; }
   details[open] summary { margin-bottom:10px; }
   details > * + * { margin-top:10px; }
-  .tools { display:flex; gap:8px; padding:8px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .tools { display:flex; gap:8px; padding:8px 16px; border-bottom:1px solid var(--line); flex-wrap:nowrap; overflow-x:auto; white-space:nowrap; }
+  .tools .iconbtn { flex:none; }
   .attach { display:flex; align-items:center; gap:10px; padding:8px 16px; border-top:1px solid var(--line); }
   .attach[hidden] { display:none; }
   .attach img { height:48px; border-radius:8px; }
@@ -176,7 +178,7 @@
     </details>
     <details>
       <summary>Smart home commands</summary>
-      <p>One per line: name = https://link. Add GET or POST before the link if needed. Starlx can then run them by name, for example from a Home Assistant, IFTTT or Make webhook. Keep these links private. They are not included in backups.</p>
+      <p>One per line: name = https://link. Add GET or POST before the link if needed. Starlx can then run them by name, for example from a Home Assistant, IFTTT or Make webhook. Put {value} in a link where a value should go, like a volume level. Keep these links private. They are not included in backups.</p>
       <textarea id="hooks" rows="4" aria-label="Smart home commands" placeholder="lamp on = https://example.com/hook/abc123&#10;lamp off = POST https://example.com/hook/def456"></textarea>
     </details>
     <details>
@@ -190,12 +192,15 @@
     </details>
     <details>
       <summary>Backup</summary>
-      <p>Saves your memory, personality, chat and settings to a file. API keys are not included, so you re-enter those yourself.</p>
+      <p>Backs up memory, tasks, personality, settings and chat. Set a passphrase to also include your API keys and command links. The file is then encrypted, so it is safe to email to yourself. Remember the passphrase, because it cannot be recovered.</p>
+      <input id="bkPass" type="password" placeholder="Backup passphrase (optional)" autocomplete="new-password" autocapitalize="off" spellcheck="false" aria-label="Backup passphrase">
+      <button class="primary" id="shareBtn" type="button" style="padding:12px">Send backup to Gmail or share</button>
       <div class="row">
-        <button class="ghost" id="exportBtn">Export</button>
-        <button class="ghost" id="importBtn">Import</button>
+        <button class="ghost" id="exportBtn">Save file</button>
+        <button class="ghost" id="importBtn">Restore</button>
       </div>
       <input type="file" id="importFile" accept="application/json,.json" hidden>
+      <p id="bkMsg"></p>
     </details>
     <div class="row">
       <button class="ghost" id="clear">Clear chat</button>
@@ -319,7 +324,8 @@ function getHooks() {
 function hooksContext() {
   const h = getHooks();
   if (!h.length) return "";
-  return " Smart-home commands the user set up. Trigger one with [[action: webhook | exact name]] only when asked: " + h.map(x => x.name).join(", ") + ".";
+  return " Device commands the user set up. Trigger one with [[action: webhook | exact name]], or [[action: webhook | exact name | value]] for commands marked (takes a value), such as a volume level or a number. Only when asked: " +
+    h.map(x => x.name + (x.url.indexOf("{value}") >= 0 ? " (takes a value)" : "")).join(", ") + ".";
 }
 
 function searchActive() {
@@ -393,7 +399,8 @@ function buildAction(parts) {
   if (t === "webhook") {
     const h = getHooks().find(x => x.name.toLowerCase() === a1.toLowerCase());
     if (!h) return null;
-    return { label: "Run: " + h.name, fn: "hook:" + h.name };
+    const val = a2.replace(/[\x00-\x1f]/g, "").slice(0, 60);
+    return { label: "Run: " + h.name + (val ? " (" + val + ")" : ""), fn: "hook:" + h.name + (val ? "|" + val : "") };
   }
   if (t === "device") {
     const cmd = parts.slice(1).join("|").trim().toUpperCase();
@@ -843,13 +850,36 @@ devBtn.addEventListener("click", () => {
 });
 
 // ---- Backup ----
-function exportBackup() {
+const bkMsg = document.getElementById("bkMsg");
+const b64 = {
+  enc: u8 => { let t = ""; for (let i = 0; i < u8.length; i += 8192) t += String.fromCharCode.apply(null, u8.subarray(i, i + 8192)); return btoa(t); },
+  dec: str => Uint8Array.from(atob(str), c => c.charCodeAt(0))
+};
+function collectBackup(includeSecrets) {
   const data = {};
   for (let i = 0; i < localStorage.length; i++) {
     const k = localStorage.key(i);
-    if (k && k.startsWith("starlx_") && !k.startsWith("starlx_key_") && k !== "starlx_loc" && k !== "starlx_hooks") data[k] = localStorage.getItem(k);
+    if (!k || !k.startsWith("starlx_") || k === "starlx_loc") continue;
+    if (!includeSecrets && (k.startsWith("starlx_key_") || k === "starlx_hooks")) continue;
+    data[k] = localStorage.getItem(k);
   }
-  const blob = new Blob([JSON.stringify({ app: "starlx", version: 1, data: data }, null, 1)], { type: "application/json" });
+  return data;
+}
+async function deriveKey(pass, salt) {
+  const base = await crypto.subtle.importKey("raw", new TextEncoder().encode(pass), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name: "PBKDF2", salt: salt, iterations: 250000, hash: "SHA-256" }, base, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+}
+async function buildBackupFile(pass) {
+  const data = collectBackup(!!pass);
+  if (!pass) return JSON.stringify({ app: "starlx", version: 2, enc: false, data: data }, null, 1);
+  const salt = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await deriveKey(pass, salt);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv: iv }, key, new TextEncoder().encode(JSON.stringify(data))));
+  return JSON.stringify({ app: "starlx", version: 2, enc: true, salt: b64.enc(salt), iv: b64.enc(iv), data: b64.enc(ct) });
+}
+function downloadText(text) {
+  const blob = new Blob([text], { type: "application/json" });
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
   a.download = "starlx-backup.json";
@@ -858,15 +888,60 @@ function exportBackup() {
   a.remove();
   setTimeout(() => URL.revokeObjectURL(a.href), 3000);
 }
+async function shareBackup() {
+  const pass = document.getElementById("bkPass").value;
+  try {
+    const text = await buildBackupFile(pass);
+    const file = new File([text], "starlx-backup.json", { type: "application/json" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      await navigator.share({ files: [file], title: "Starlx backup" });
+      bkMsg.textContent = "Pick Gmail, address it to yourself, and send." + (pass ? "" : " This backup has no API keys. Set a passphrase to include them.");
+    } else {
+      downloadText(text);
+      bkMsg.textContent = "Sharing isn't available here, so the file was saved. Attach it to an email yourself.";
+    }
+  } catch (e) {
+    if (e && e.name === "AbortError") return;
+    bkMsg.textContent = "Backup failed: " + (e && e.message ? e.message : "unknown error");
+  }
+}
+async function saveBackup() {
+  const pass = document.getElementById("bkPass").value;
+  try {
+    downloadText(await buildBackupFile(pass));
+    bkMsg.textContent = pass ? "Encrypted backup saved. It includes your API keys." : "Backup saved. It does not include API keys. Set a passphrase to include them.";
+  } catch (e) {
+    bkMsg.textContent = "Backup failed: " + (e && e.message ? e.message : "unknown error");
+  }
+}
 async function importBackup(file) {
   const obj = JSON.parse(await file.text());
-  if (!obj || obj.app !== "starlx" || typeof obj.data !== "object") throw new Error("That file is not a Starlx backup");
-  Object.keys(obj.data).forEach(k => {
-    if (k.startsWith("starlx_") && !k.startsWith("starlx_key_") && k !== "starlx_loc" && k !== "starlx_hooks" && typeof obj.data[k] === "string") store.set(k, obj.data[k]);
+  if (!obj || obj.app !== "starlx") throw new Error("That file is not a Starlx backup");
+  let data, secrets = false;
+  if (obj.enc) {
+    const pass = document.getElementById("bkPass").value;
+    if (!pass) throw new Error("Type the backup passphrase first, then tap Restore again");
+    try {
+      const key = await deriveKey(pass, b64.dec(obj.salt));
+      const pt = await crypto.subtle.decrypt({ name: "AES-GCM", iv: b64.dec(obj.iv) }, key, b64.dec(obj.data));
+      data = JSON.parse(new TextDecoder().decode(pt));
+      secrets = true;
+    } catch (e) {
+      throw new Error("Wrong passphrase, or the file is damaged");
+    }
+  } else {
+    data = obj.data;
+  }
+  if (!data || typeof data !== "object") throw new Error("The backup is empty");
+  Object.keys(data).forEach(k => {
+    if (!k.startsWith("starlx_") || k === "starlx_loc" || typeof data[k] !== "string") return;
+    if (!secrets && (k.startsWith("starlx_key_") || k === "starlx_hooks")) return;
+    store.set(k, data[k]);
   });
   location.reload();
 }
-document.getElementById("exportBtn").addEventListener("click", exportBackup);
+document.getElementById("shareBtn").addEventListener("click", shareBackup);
+document.getElementById("exportBtn").addEventListener("click", saveBackup);
 const importFile = document.getElementById("importFile");
 document.getElementById("importBtn").addEventListener("click", () => importFile.click());
 importFile.addEventListener("change", async () => {
@@ -874,8 +949,9 @@ importFile.addEventListener("change", async () => {
   importFile.value = "";
   if (!f) return;
   try { await importBackup(f); }
-  catch (e) { sheet.classList.remove("open"); render("Import failed: " + e.message); }
+  catch (e) { bkMsg.textContent = "Restore failed: " + e.message; }
 });
+if (navigator.storage && navigator.storage.persist) { navigator.storage.persist().catch(() => {}); }
 
 // ---- Wake word ----
 const wakeBtn = document.getElementById("wakeBtn");
@@ -1118,11 +1194,14 @@ async function setTorch(on) {
     render("Flashlight failed: " + e.message + " (It needs camera permission and Chrome on Android.)");
   }
 }
-async function runHook(name) {
+async function runHook(arg) {
+  const bar = arg.indexOf("|");
+  const name = bar >= 0 ? arg.slice(0, bar) : arg;
+  const val = bar >= 0 ? arg.slice(bar + 1) : "";
   const h = getHooks().find(x => x.name.toLowerCase() === name.toLowerCase());
   if (!h) { render("That command isn't in your Smart home commands any more."); return; }
   try {
-    await fetch(h.url, { method: h.method, mode: "no-cors" });
+    await fetch(h.url.split("{value}").join(encodeURIComponent(val)), { method: h.method, mode: "no-cors" });
     showDevLine("Sent: " + h.name);
   } catch (e) {
     render("Command failed: " + e.message);
