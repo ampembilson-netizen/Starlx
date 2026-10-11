@@ -39,7 +39,7 @@
   button.primary { background:var(--arc); color:#06222A; border:none; border-radius:12px; padding:0 18px;
     font-size:16px; font-weight:600; cursor:pointer; }
   .mic { background:var(--panel); color:var(--arc); border:1px solid var(--line); border-radius:12px;
-    padding:0 14px; font-size:16px; font-weight:600; cursor:pointer; }
+    padding:0 12px; font-size:15px; font-weight:600; cursor:pointer; }
   .mic.on { background:var(--gold); color:#1B1405; border-color:var(--gold); }
   .iconbtn.active { color:var(--arc); border-color:var(--arc); }
   button:disabled { opacity:.45; cursor:default; }
@@ -53,6 +53,12 @@
   summary { cursor:pointer; font-size:15px; }
   details[open] summary { margin-bottom:10px; }
   details > * + * { margin-top:10px; }
+  .tools { display:flex; gap:8px; padding:8px 16px; border-bottom:1px solid var(--line); flex-wrap:wrap; }
+  .attach { display:flex; align-items:center; gap:10px; padding:8px 16px; border-top:1px solid var(--line); }
+  .attach[hidden] { display:none; }
+  .attach img { height:48px; border-radius:8px; }
+  .pic { display:block; max-width:100%; max-height:200px; border-radius:10px; margin-bottom:6px; }
+  .note { font-size:13px; opacity:.7; }
   .actions { align-self:flex-start; display:flex; flex-wrap:wrap; gap:8px; max-width:92%; }
   .act { border:1px solid var(--arc); color:var(--arc); border-radius:999px; padding:8px 14px;
     font-size:15px; text-decoration:none; }
@@ -87,14 +93,23 @@
       <div class="name">Starlx</div>
       <div class="status" id="status">Online</div>
     </div>
-    <button class="iconbtn" id="voiceToggle" aria-pressed="false">Voice: off</button>
     <button class="iconbtn" id="openSettings">Settings</button>
+  </div>
+  <div class="tools">
+    <button class="iconbtn" id="voiceToggle" aria-pressed="false">Voice: off</button>
+    <button class="iconbtn" id="handsFree" aria-pressed="false">Hands-free: off</button>
   </div>
 
   <div class="feed" id="feed"></div>
 
+  <div class="attach" id="attach" hidden>
+    <img id="attachImg" alt="Attached photo">
+    <button class="iconbtn" id="attachClear">Remove photo</button>
+  </div>
   <div class="bar">
     <textarea id="input" rows="1" placeholder="Message Starlx" aria-label="Message Starlx"></textarea>
+    <button class="mic" id="photo" aria-label="Attach a photo">Photo</button>
+    <input type="file" id="file" accept="image/*" hidden>
     <button class="mic" id="mic" aria-label="Speak to Starlx">Mic</button>
     <button class="primary" id="send">Send</button>
   </div>
@@ -262,6 +277,20 @@ const getKey = p => store.get("starlx_key_" + p, "");
 const getModel = p => store.get("starlx_model_" + p, "") || PROVIDERS[p].defaultModel;
 const CHAT_STORE = "starlx_chat";
 
+function toApi(history, anthropic) {
+  let li = -1;
+  for (let i = history.length - 1; i >= 0; i--) { if (history[i].image) { li = i; break; } }
+  return history.map((m, i) => {
+    if (m.image && i === li) {
+      const b64 = m.image.split(",")[1];
+      return anthropic
+        ? { role: m.role, content: [{ type: "image", source: { type: "base64", media_type: "image/jpeg", data: b64 } }, { type: "text", text: m.content }] }
+        : { role: m.role, content: [{ type: "text", text: m.content }, { type: "image_url", image_url: { url: m.image } }] };
+    }
+    return { role: m.role, content: m.content };
+  });
+}
+
 async function askModel(history) {
   const provider = getProvider();
   const key = getKey(provider);
@@ -270,7 +299,7 @@ async function askModel(history) {
     const res = await fetch(PROVIDERS[provider].url, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + key },
-      body: JSON.stringify({ model: model, messages: [{ role: "system", content: buildSystem() }, ...history.map(m => ({ role: m.role, content: m.content }))] })
+      body: JSON.stringify({ model: model, messages: [{ role: "system", content: buildSystem() }, ...toApi(history, false)] })
     });
     const data = await res.json();
     if (!res.ok) throw new Error((data.error && data.error.message) || "Request failed");
@@ -285,7 +314,7 @@ async function askModel(history) {
       "anthropic-dangerous-direct-browser-access": "true"
     },
     body: JSON.stringify(Object.assign(
-      { model: model, max_tokens: 1000, system: buildSystem(), messages: history.map(m => ({ role: m.role, content: m.content })) },
+      { model: model, max_tokens: 1000, system: buildSystem(), messages: toApi(history, true) },
       store.get("starlx_search", "0") === "1" ? { tools: [{ type: "web_search_20250305", name: "web_search", max_uses: 3 }] } : {}
     ))
   });
@@ -310,7 +339,7 @@ try { messages = JSON.parse(store.get(CHAT_STORE, "[]")); } catch (e) { messages
 let loading = false;
 
 function saveChat() {
-  store.set(CHAT_STORE, JSON.stringify(messages.slice(-60)));
+  store.set(CHAT_STORE, JSON.stringify(messages.slice(-60).map(m => m.image ? Object.assign({}, m, { image: undefined, hadImage: true }) : m)));
 }
 
 function render(errorText) {
@@ -327,6 +356,15 @@ function render(errorText) {
     const d = document.createElement("div");
     d.className = "msg " + (m.role === "user" ? "user" : "ai");
     d.textContent = m.content;
+    if (m.image) {
+      const im = document.createElement("img");
+      im.className = "pic"; im.alt = "Photo"; im.src = m.image;
+      d.insertBefore(im, d.firstChild);
+    } else if (m.hadImage) {
+      const n = document.createElement("div");
+      n.className = "note"; n.textContent = "[photo sent earlier]";
+      d.insertBefore(n, d.firstChild);
+    }
     feed.appendChild(d);
     if (m.actions && m.actions.length) {
       const row = document.createElement("div");
@@ -358,13 +396,24 @@ function setLoading(v) {
   sendBtn.disabled = v;
 }
 
-async function send() {
-  const text = input.value.trim();
-  if (!text || loading) return;
-  if (!getKey(getProvider())) { openSettings(); return; }
+let pendingImage = null;
+function setPending(dataUrl) {
+  pendingImage = dataUrl;
+  document.getElementById("attach").hidden = !dataUrl;
+  document.getElementById("attachImg").src = dataUrl || "";
+}
 
-  messages.push({ role: "user", content: text });
+async function send() {
+  let text = input.value.trim();
+  if ((!text && !pendingImage) || loading) return;
+  if (!getKey(getProvider())) { openSettings(); return; }
+  const image = pendingImage;
+  if (!text) text = "What do you see in this photo?";
+  const msg = { role: "user", content: text };
+  if (image) msg.image = image;
+  messages.push(msg);
   input.value = "";
+  setPending(null);
   saveChat();
   render();
   setLoading(true);
@@ -379,71 +428,142 @@ async function send() {
     render();
     speak(reply);
   } catch (e) {
-    messages.pop();
+    const popped = messages.pop();
     input.value = text;
+    if (popped && popped.image) setPending(popped.image);
     saveChat();
-    render("Starlx couldn't answer: " + e.message);
+    render("Starlx couldn't answer: " + e.message + (image ? " (If you sent a photo, check that your model can read images.)" : ""));
   } finally {
     setLoading(false);
   }
 }
 
-
 // ---- Voice ----
 let voiceOn = store.get("starlx_voice", "0") === "1";
+let handsFree = false;
 const voiceBtn = document.getElementById("voiceToggle");
+const hfBtn = document.getElementById("handsFree");
 const micBtn = document.getElementById("mic");
+const synth = window.speechSynthesis;
 function paintVoice() {
   voiceBtn.textContent = "Voice: " + (voiceOn ? "on" : "off");
   voiceBtn.classList.toggle("active", voiceOn);
   voiceBtn.setAttribute("aria-pressed", String(voiceOn));
+  hfBtn.textContent = "Hands-free: " + (handsFree ? "on" : "off");
+  hfBtn.classList.toggle("active", handsFree);
+  hfBtn.setAttribute("aria-pressed", String(handsFree));
 }
 paintVoice();
 voiceBtn.addEventListener("click", () => {
   voiceOn = !voiceOn;
   store.set("starlx_voice", voiceOn ? "1" : "0");
-  if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+  if (!voiceOn) { if (synth) synth.cancel(); handsFree = false; if (listening && recog) recog.stop(); }
   paintVoice();
 });
 
+function afterSpeak() {
+  setTimeout(() => { if (handsFree && !loading && !listening) startListening(); }, 400);
+}
 function speak(text) {
-  if (!voiceOn || !window.speechSynthesis) return;
-  window.speechSynthesis.cancel();
+  if (!voiceOn || !synth) { afterSpeak(); return; }
+  synth.cancel();
   const u = new SpeechSynthesisUtterance(text);
   u.lang = navigator.language || "en-US";
   u.rate = 1.0;
-  window.speechSynthesis.speak(u);
+  u.onend = afterSpeak;
+  u.onerror = afterSpeak;
+  synth.speak(u);
 }
 
 const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
 let recog = null;
 let listening = false;
+
+function startListening() {
+  if (!SR || listening) return;
+  if (synth) synth.cancel();
+  let gotResult = false;
+  recog = new SR();
+  recog.lang = navigator.language || "en-US";
+  recog.interimResults = false;
+  recog.maxAlternatives = 1;
+  recog.onstart = () => { listening = true; micBtn.classList.add("on"); micBtn.textContent = "Listening"; statusEl.textContent = "Listening"; };
+  recog.onend = () => {
+    listening = false;
+    micBtn.classList.remove("on");
+    micBtn.textContent = "Mic";
+    if (!loading) statusEl.textContent = "Online";
+    if (handsFree && !gotResult) {
+      handsFree = false;
+      paintVoice();
+      render("Hands-free paused. Tap Hands-free to resume.");
+    }
+  };
+  recog.onerror = (ev) => {
+    const msg = ev.error === "not-allowed" || ev.error === "service-not-allowed"
+      ? "Microphone blocked. Allow the mic for this site in Chrome's site settings."
+      : ev.error === "no-speech" || ev.error === "aborted" ? "" : "Voice error: " + ev.error;
+    if (msg) render(msg);
+  };
+  recog.onresult = (ev) => {
+    const t = ev.results[0][0].transcript.trim();
+    if (t) { gotResult = true; input.value = t; send(); }
+  };
+  try { recog.start(); } catch (e) {}
+}
+
 if (!SR) {
   micBtn.style.display = "none";
+  hfBtn.style.display = "none";
 } else {
   micBtn.addEventListener("click", () => {
     if (loading) return;
     if (listening && recog) { recog.stop(); return; }
-    if (window.speechSynthesis) window.speechSynthesis.cancel();
-    recog = new SR();
-    recog.lang = navigator.language || "en-US";
-    recog.interimResults = false;
-    recog.maxAlternatives = 1;
-    recog.onstart = () => { listening = true; micBtn.classList.add("on"); micBtn.textContent = "Listening"; statusEl.textContent = "Listening"; };
-    recog.onend = () => { listening = false; micBtn.classList.remove("on"); micBtn.textContent = "Mic"; if (!loading) statusEl.textContent = "Online"; };
-    recog.onerror = (ev) => {
-      const msg = ev.error === "not-allowed" || ev.error === "service-not-allowed"
-        ? "Microphone blocked. Allow the mic for this site in Chrome's site settings."
-        : ev.error === "no-speech" ? "" : "Voice error: " + ev.error;
-      if (msg) render(msg);
-    };
-    recog.onresult = (ev) => {
-      const t = ev.results[0][0].transcript.trim();
-      if (t) { input.value = t; send(); }
-    };
-    try { recog.start(); } catch (e) {}
+    startListening();
+  });
+  hfBtn.addEventListener("click", () => {
+    handsFree = !handsFree;
+    if (handsFree) {
+      voiceOn = true;
+      store.set("starlx_voice", "1");
+      paintVoice();
+      if (!loading) startListening();
+    } else {
+      if (synth) synth.cancel();
+      if (listening && recog) recog.stop();
+      paintVoice();
+    }
   });
 }
+
+// ---- Photos ----
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      const max = 1024;
+      const sc = Math.min(1, max / Math.max(img.width, img.height));
+      const w = Math.round(img.width * sc), h = Math.round(img.height * sc);
+      const c = document.createElement("canvas");
+      c.width = w; c.height = h;
+      c.getContext("2d").drawImage(img, 0, 0, w, h);
+      URL.revokeObjectURL(url);
+      resolve(c.toDataURL("image/jpeg", 0.8));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not read that image")); };
+    img.src = url;
+  });
+}
+const fileInput = document.getElementById("file");
+document.getElementById("photo").addEventListener("click", () => fileInput.click());
+fileInput.addEventListener("change", async () => {
+  const f = fileInput.files && fileInput.files[0];
+  fileInput.value = "";
+  if (!f) return;
+  try { setPending(await loadImage(f)); } catch (e) { render(e.message); }
+});
+document.getElementById("attachClear").addEventListener("click", () => setPending(null));
 
 sendBtn.addEventListener("click", send);
 input.addEventListener("keydown", e => {
