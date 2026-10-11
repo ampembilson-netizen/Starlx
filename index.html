@@ -38,6 +38,10 @@
   .bar textarea { flex:1; resize:none; line-height:1.4; max-height:110px; }
   button.primary { background:var(--arc); color:#06222A; border:none; border-radius:12px; padding:0 18px;
     font-size:16px; font-weight:600; cursor:pointer; }
+  .mic { background:var(--panel); color:var(--arc); border:1px solid var(--line); border-radius:12px;
+    padding:0 14px; font-size:16px; font-weight:600; cursor:pointer; }
+  .mic.on { background:var(--gold); color:#1B1405; border-color:var(--gold); }
+  .iconbtn.active { color:var(--arc); border-color:var(--arc); }
   button:disabled { opacity:.45; cursor:default; }
   :focus-visible { outline:2px solid var(--arc); outline-offset:2px; }
   .sheet { position:fixed; inset:0; background:rgba(5,10,18,.8); display:none; align-items:flex-end; z-index:5; }
@@ -73,6 +77,7 @@
       <div class="name">Starlx</div>
       <div class="status" id="status">Online</div>
     </div>
+    <button class="iconbtn" id="voiceToggle" aria-pressed="false">Voice: off</button>
     <button class="iconbtn" id="openSettings">Settings</button>
   </div>
 
@@ -80,6 +85,7 @@
 
   <div class="bar">
     <textarea id="input" rows="1" placeholder="Message Starlx" aria-label="Message Starlx"></textarea>
+    <button class="mic" id="mic" aria-label="Speak to Starlx">Mic</button>
     <button class="primary" id="send">Send</button>
   </div>
 </div>
@@ -106,6 +112,9 @@
 
 <script>
 const SYSTEM = "You are Starlx, a personal AI assistant in the spirit of Jarvis: calm, quick, loyal, with a touch of dry wit. " +
+  "You were created by Emmanuel Ampem, also known as AJ, who is the person you are talking to. " +
+  "If asked who created you or who built you, say you were created by Emmanuel Ampem (AJ). Do not claim to be made by OpenAI, Google, Meta, Anthropic or any other company. " +
+  "If asked what technology runs you, you may say you run on a language model behind the scenes. " +
   "Talk to the user directly. Keep replies short (1-4 sentences) unless asked for more. Plain text only, no markdown.";
 const PROVIDERS = {
   anthropic: { label: "Anthropic", keyHint: "sk-ant-...", defaultModel: "claude-sonnet-4-6",
@@ -226,6 +235,7 @@ async function send() {
     messages.push({ role: "assistant", content: reply });
     saveChat();
     render();
+    speak(reply);
   } catch (e) {
     messages.pop();
     input.value = text;
@@ -234,6 +244,63 @@ async function send() {
   } finally {
     setLoading(false);
   }
+}
+
+
+// ---- Voice ----
+let voiceOn = store.get("starlx_voice", "0") === "1";
+const voiceBtn = document.getElementById("voiceToggle");
+const micBtn = document.getElementById("mic");
+function paintVoice() {
+  voiceBtn.textContent = "Voice: " + (voiceOn ? "on" : "off");
+  voiceBtn.classList.toggle("active", voiceOn);
+  voiceBtn.setAttribute("aria-pressed", String(voiceOn));
+}
+paintVoice();
+voiceBtn.addEventListener("click", () => {
+  voiceOn = !voiceOn;
+  store.set("starlx_voice", voiceOn ? "1" : "0");
+  if (!voiceOn && window.speechSynthesis) window.speechSynthesis.cancel();
+  paintVoice();
+});
+
+function speak(text) {
+  if (!voiceOn || !window.speechSynthesis) return;
+  window.speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = navigator.language || "en-US";
+  u.rate = 1.0;
+  window.speechSynthesis.speak(u);
+}
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let recog = null;
+let listening = false;
+if (!SR) {
+  micBtn.style.display = "none";
+} else {
+  micBtn.addEventListener("click", () => {
+    if (loading) return;
+    if (listening && recog) { recog.stop(); return; }
+    if (window.speechSynthesis) window.speechSynthesis.cancel();
+    recog = new SR();
+    recog.lang = navigator.language || "en-US";
+    recog.interimResults = false;
+    recog.maxAlternatives = 1;
+    recog.onstart = () => { listening = true; micBtn.classList.add("on"); micBtn.textContent = "Listening"; statusEl.textContent = "Listening"; };
+    recog.onend = () => { listening = false; micBtn.classList.remove("on"); micBtn.textContent = "Mic"; if (!loading) statusEl.textContent = "Online"; };
+    recog.onerror = (ev) => {
+      const msg = ev.error === "not-allowed" || ev.error === "service-not-allowed"
+        ? "Microphone blocked. Allow the mic for this site in Chrome's site settings."
+        : ev.error === "no-speech" ? "" : "Voice error: " + ev.error;
+      if (msg) render(msg);
+    };
+    recog.onresult = (ev) => {
+      const t = ev.results[0][0].transcript.trim();
+      if (t) { input.value = t; send(); }
+    };
+    try { recog.start(); } catch (e) {}
+  });
 }
 
 sendBtn.addEventListener("click", send);
